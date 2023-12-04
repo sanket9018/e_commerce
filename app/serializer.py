@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from rest_framework.serializers import ValidationError
 from django.db.models import Sum
-from . models import (
+from .models import (
     Customer,
     Product,
     Order,
@@ -10,76 +10,108 @@ from . models import (
 from django.utils import timezone
 from datetime import date
 
-class CustomerSerializer(serializers.ModelSerializer):
 
+class CustomerSerializer(serializers.ModelSerializer):
     class Meta:
         model = Customer
         fields = [
-            'id',
-            'name',
-            'contact_number',
-            'email',
+            "id",
+            "name",
+            "contact_number",
+            "email",
         ]
 
-class ProductSerializer(serializers.ModelSerializer):
+    def validate_name(self, value):
+        if Customer.objects.filter(name=value).exists():
+            raise serializers.ValidationError(f"{value} name is already exists")
+        return value
 
+
+class ProductSerializer(serializers.ModelSerializer):
     class Meta:
         model = Product
         fields = [
-            'id',
-            'name',
-            'weight',
+            "id",
+            "name",
+            "weight",
         ]
-    
-class OrderItemSerializer(serializers.ModelSerializer):
 
+    def validate_name(self, value):
+        if Product.objects.filter(name=value).exists():
+            raise serializers.ValidationError(f"{value} is already exists in products")
+        return value
+
+    def validate_weight(self, value):
+        if value < 0 or value > 25:
+            raise serializers.ValidationError(
+                "Weight can not be less then 0 or more then 25kg"
+            )
+        return value
+
+
+class OrderItemSerializer(serializers.ModelSerializer):
     class Meta:
         model = Order_item
-        fields = [
-            'id',
-            'order',
-            'product',
-            'quantity',
-        ]
+        fields = ["product", "quantity"]
 
-    def validate(self, value):
-        print("➡ value :", value)
-        order = value['order'].id
-        product = value['product'].id
-        quantity = value['quantity']
-        order_obj = Order.objects.filter(id = order).first()
-        product_obj = Product.objects.filter(id = product).first()
-
-        if not order_obj or not product_obj:
-            raise serializers.ValidationError("Invalid order or product.")
-
-        total_weight = product_obj.weight * quantity
-        current_order_weight = Order_item.objects.filter(order=order).aggregate(Sum('product__weight'))['product__weight__sum']
-        print("➡ current_order_weight :", current_order_weight)
-
-        if current_order_weight is None:
-            current_order_weight = 0
-
-        if (current_order_weight + total_weight) > 150.0:
-            raise serializers.ValidationError("Order cumulative weight exceeds 150kg.")
-
-        return value
 
 class OrderSerializer(serializers.ModelSerializer):
-    order_items = OrderItemSerializer(read_only = True, many = True)
+    order_items = OrderItemSerializer(many=True)
+
     class Meta:
         model = Order
-        depth = 1
         fields = [
-            'id',
-            'customer',
-            'order_data',
-            'order_number',
-            'address',
-            'order_items',
+            "id",
+            "order_number",
+            "customer",
+            "order_date",
+            "address",
+            "order_items",
         ]
-    
-    def validate_order_data(self, value):
-        if value <  date.today():
+
+    def create(self, validated_data):
+        order_items_data = validated_data.pop("order_items")
+        order = Order.objects.create(**validated_data)
+        for order_item_data in order_items_data:
+            Order_item.objects.create(order=order, **order_item_data)
+
+        return order
+
+    def update(self, instance, validated_data):
+        order_items_data = validated_data.pop("order_items")
+        instance.customer = validated_data.get("customer", instance.customer)
+        instance.order_date = validated_data.get("order_date", instance.order_date)
+        instance.address = validated_data.get("address", instance.address)
+
+        for order_item_data in order_items_data:
+            product = order_item_data["product"]
+            quantity = order_item_data["quantity"]
+            Order_item.objects.update_or_create(
+                order=instance, product=product, defaults={"quantity": quantity}
+            )
+
+        instance.save()
+        return instance
+
+    def validate_order_date(self, value):
+        if value < date.today():
             raise serializers.ValidationError("Date must not be in the past.")
         return value
+
+    def validate(self, value):
+        total_weight = sum(
+            [prod["product"].weight * prod["quantity"] for prod in value["order_items"]]
+        )
+        if total_weight > 150:
+            raise ValidationError("In a order wight can not be more than 150kg.")
+        return value
+
+    def validate_order_items(self, order_items_data):
+        product_set = set()
+        for order_item_data in order_items_data:
+            product = order_item_data["product"]
+            if product in product_set:
+                raise serializers.ValidationError(f"{product} is already in the order.")
+            product_set.add(product)
+
+        return order_items_data
